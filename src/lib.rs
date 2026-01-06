@@ -168,7 +168,7 @@ pub fn api() -> &'static ort_sys::OrtApi {
 				assert_ne!(base, ptr::null());
 
 				let get_version_string: extern_system_fn! { unsafe fn () -> *const c_char } =
-					(*base).GetVersionString.expect("`GetVersionString` must be present in `OrtApiBase`");
+					(*base).GetVersionString.unwrap_or_else(|| panic!("`GetVersionString` must be present in `OrtApiBase`"));
 				let version_string = get_version_string();
 				let version_string = CStr::from_ptr(version_string).to_string_lossy();
 				tracing::info!("Loaded ONNX Runtime dylib with version '{version_string}'");
@@ -188,7 +188,7 @@ pub fn api() -> &'static ort_sys::OrtApi {
 					std::cmp::Ordering::Equal => {}
 				};
 				let get_api: extern_system_fn! { unsafe fn(u32) -> *const ort_sys::OrtApi } =
-					(*base).GetApi.expect("`GetApi` must be present in `OrtApiBase`");
+					(*base).GetApi.unwrap_or_else(|| panic!("`GetApi` must be present in `OrtApiBase`"));
 				let api: *const ort_sys::OrtApi = get_api(ort_sys::ORT_API_VERSION);
 				ApiPointer(NonNull::new(api.cast_mut()).expect("Failed to initialize ORT API"))
 			}
@@ -197,7 +197,7 @@ pub fn api() -> &'static ort_sys::OrtApi {
 				let base: *const ort_sys::OrtApiBase = ort_sys::OrtGetApiBase();
 				assert_ne!(base, ptr::null());
 				let get_api: extern_system_fn! { unsafe fn(u32) -> *const ort_sys::OrtApi } =
-					(*base).GetApi.expect("`GetApi` must be present in `OrtApiBase`");
+					(*base).GetApi.unwrap_or_else(|| panic!("`GetApi` must be present in `OrtApiBase`"));
 				let api: *const ort_sys::OrtApi = get_api(ort_sys::ORT_API_VERSION);
 				ApiPointer(NonNull::new(api.cast_mut()).expect("Failed to initialize ORT API"))
 			}
@@ -224,41 +224,41 @@ pub trait AsPointer {
 #[macro_export]
 macro_rules! ortsys {
 	($method:ident) => {
-		$crate::api().$method.unwrap_or_else(|| unreachable!(concat!("Method `", stringify!($method), "` is null")))
+		$crate::api().$method.unwrap()
 	};
 	($method:ident($($n:expr),+ $(,)?)) => {
-		$crate::api().$method.unwrap_or_else(|| unreachable!(concat!("Method `", stringify!($method), "` is null")))($($n),+)
+		$crate::api().$method.unwrap()($($n),+)
 	};
 	(unsafe $method:ident($($n:expr),+ $(,)?)) => {
-		unsafe { $crate::api().$method.unwrap_or_else(|| unreachable!(concat!("Method `", stringify!($method), "` is null")))($($n),+) }
+		unsafe { $crate::api().$method.unwrap()($($n),+) }
 	};
 	($method:ident($($n:expr),+ $(,)?).expect($e:expr)) => {
-		$crate::error::status_to_result($crate::api().$method.unwrap_or_else(|| unreachable!(concat!("Method `", stringify!($method), "` is null")))($($n),+)).expect($e)
+		$crate::error::status_to_result($crate::api().$method.unwrap()($($n),+)).expect($e)
 	};
 	(unsafe $method:ident($($n:expr),+ $(,)?).expect($e:expr)) => {
-		$crate::error::status_to_result(unsafe { $crate::api().$method.unwrap_or_else(|| unreachable!(concat!("Method `", stringify!($method), "` is null")))($($n),+) }).expect($e)
+		$crate::error::status_to_result(unsafe { $crate::api().$method.unwrap()($($n),+) }).expect($e)
 	};
 	($method:ident($($n:expr),+ $(,)?); nonNull($($check:expr),+ $(,)?)$(;)?) => {
-		$crate::api().$method.unwrap_or_else(|| unreachable!(concat!("Method `", stringify!($method), "` is null")))($($n),+);
+		$crate::api().$method.unwrap()($($n),+);
 		$($crate::error::assert_non_null_pointer($check, stringify!($method))?;)+
 	};
 	(unsafe $method:ident($($n:expr),+ $(,)?); nonNull($($check:expr),+ $(,)?)$(;)?) => {{
-		let _x = unsafe { $crate::api().$method.unwrap_or_else(|| unreachable!(concat!("Method `", stringify!($method), "` is null")))($($n),+) };
+		let _x = unsafe { $crate::api().$method.unwrap()($($n),+) };
 		$($crate::error::assert_non_null_pointer($check, stringify!($method)).unwrap();)+
 		_x
 	}};
 	($method:ident($($n:expr),+ $(,)?)?) => {
-		$crate::error::status_to_result($crate::api().$method.unwrap_or_else(|| unreachable!(concat!("Method `", stringify!($method), "` is null")))($($n),+))?;
+		$crate::error::status_to_result($crate::api().$method.unwrap()($($n),+))?;
 	};
 	(unsafe $method:ident($($n:expr),+ $(,)?)?) => {
-		$crate::error::status_to_result(unsafe { $crate::api().$method.unwrap_or_else(|| unreachable!(concat!("Method `", stringify!($method), "` is null")))($($n),+) })?;
+		$crate::error::status_to_result(unsafe { $crate::api().$method.unwrap()($($n),+) })?;
 	};
 	($method:ident($($n:expr),+ $(,)?)?; nonNull($($check:expr),+ $(,)?)$(;)?) => {
-		$crate::error::status_to_result($crate::api().$method.unwrap_or_else(|| unreachable!(concat!("Method `", stringify!($method), "` is null")))($($n),+))?;
+		$crate::error::status_to_result($crate::api().$method.unwrap()($($n),+))?;
 		$($crate::error::assert_non_null_pointer($check, stringify!($method))?;)+
 	};
 	(unsafe $method:ident($($n:expr),+ $(,)?)?; nonNull($($check:expr),+ $(,)?)$(;)?) => {{
-		$crate::error::status_to_result(unsafe { $crate::api().$method.unwrap_or_else(|| unreachable!(concat!("Method `", stringify!($method), "` is null")))($($n),+) })?;
+		$crate::error::status_to_result(unsafe { $crate::api().$method.unwrap()($($n),+) })?;
 		$($crate::error::assert_non_null_pointer($check, stringify!($method))?;)+
 	}};
 }
