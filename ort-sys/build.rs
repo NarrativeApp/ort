@@ -1,7 +1,9 @@
 use std::{
-	env, fs,
+	env,
 	path::{Path, PathBuf}
 };
+#[cfg(any(feature = "download-binaries", feature = "copy-dylibs"))]
+use std::fs;
 
 #[allow(unused)]
 const ONNXRUNTIME_VERSION: &str = "1.20.0";
@@ -14,10 +16,12 @@ const ENV_CXXSTDLIB: &str = "CXXSTDLIB"; // Used by the `cc` crate - we should m
 #[cfg(feature = "download-binaries")]
 const ORT_EXTRACT_DIR: &str = "onnxruntime";
 
+#[cfg(feature = "download-binaries")]
 const DIST_TABLE: &str = include_str!("dist.txt");
 
 #[path = "src/internal/dirs.rs"]
 mod dirs;
+#[cfg(feature = "download-binaries")]
 use self::dirs::cache_dir;
 
 #[cfg(feature = "download-binaries")]
@@ -43,6 +47,7 @@ fn fetch_file(source_url: &str) -> Vec<u8> {
 	buffer
 }
 
+#[cfg(feature = "download-binaries")]
 fn find_dist(target: &str, feature_set: &str) -> Option<(&'static str, &'static str)> {
 	DIST_TABLE
 		.split('\n')
@@ -91,8 +96,8 @@ fn copy_libraries(lib_dir: &Path, out_dir: &Path) {
 
 		let lib_files = std::fs::read_dir(lib_dir).unwrap_or_else(|_| panic!("Failed to read contents of `{}` (does it exist?)", lib_dir.display()));
 		for lib_file in lib_files.filter(|e| {
-			e.as_ref().ok().map_or(false, |e| {
-				e.file_type().map_or(false, |e| !e.is_dir()) && [".dll", ".so", ".dylib"].into_iter().any(|v| e.path().to_string_lossy().contains(v))
+			e.as_ref().ok().is_some_and(|e| {
+				e.file_type().is_ok_and(|e| !e.is_dir()) && [".dll", ".so", ".dylib"].into_iter().any(|v| e.path().to_string_lossy().contains(v))
 			})
 		}) {
 			let lib_file = lib_file.unwrap();

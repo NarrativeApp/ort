@@ -1,5 +1,6 @@
 // based on https://github.com/dirs-dev/dirs-sys-rs/blob/main/src/lib.rs
 
+#[cfg(feature = "download-binaries")]
 pub const PYKE_ROOT: &str = "ort.pyke.io";
 
 #[cfg(all(target_os = "windows", target_arch = "x86"))]
@@ -91,7 +92,7 @@ mod windows {
 		known_folder(FOLDERID_LOCAL_APP_DATA)
 	}
 }
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "download-binaries"))]
 #[must_use]
 pub fn cache_dir() -> Option<std::path::PathBuf> {
 	self::windows::known_folder_local_app_data().map(|h| h.join(PYKE_ROOT))
@@ -100,6 +101,7 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
 #[cfg(unix)]
 #[allow(non_camel_case_types)]
 mod unix {
+	#[cfg(feature = "download-binaries")]
 	use std::{
 		env,
 		ffi::{CStr, OsString, c_char, c_int, c_long},
@@ -109,9 +111,13 @@ mod unix {
 		ptr
 	};
 
+	#[cfg(feature = "download-binaries")]
 	type uid_t = u32;
+	#[cfg(feature = "download-binaries")]
 	type gid_t = u32;
+	#[cfg(feature = "download-binaries")]
 	type size_t = usize;
+	#[cfg(feature = "download-binaries")]
 	#[repr(C)]
 	struct passwd {
 		pub pw_name: *mut c_char,
@@ -123,21 +129,24 @@ mod unix {
 		pub pw_shell: *mut c_char
 	}
 
+	#[cfg(feature = "download-binaries")]
 	extern "C" {
 		fn sysconf(name: c_int) -> c_long;
 		fn getpwuid_r(uid: uid_t, pwd: *mut passwd, buf: *mut c_char, buflen: size_t, result: *mut *mut passwd) -> c_int;
 		fn getuid() -> uid_t;
 	}
 
+	#[cfg(feature = "download-binaries")]
 	const SC_GETPW_R_SIZE_MAX: c_int = 70;
 
+	#[cfg(all(target_os = "linux", feature = "download-binaries"))]
 	#[must_use]
 	pub fn is_absolute_path(path: OsString) -> Option<PathBuf> {
 		let path = PathBuf::from(path);
 		if path.is_absolute() { Some(path) } else { None }
 	}
 
-	#[cfg(not(target_os = "windows"))]
+	#[cfg(all(not(target_os = "windows"), feature = "download-binaries"))]
 	#[must_use]
 	pub fn home_dir() -> Option<PathBuf> {
 		return env::var_os("HOME")
@@ -170,7 +179,7 @@ mod unix {
 	}
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "download-binaries"))]
 #[must_use]
 pub fn cache_dir() -> Option<std::path::PathBuf> {
 	std::env::var_os("XDG_CACHE_HOME")
@@ -178,7 +187,7 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
 		.or_else(|| self::unix::home_dir().map(|h| h.join(".cache").join(PYKE_ROOT)))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "download-binaries"))]
 #[must_use]
 pub fn cache_dir() -> Option<std::path::PathBuf> {
 	self::unix::home_dir().map(|h| h.join("Library/Caches").join(PYKE_ROOT))
