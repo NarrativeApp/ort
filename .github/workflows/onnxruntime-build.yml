@@ -1,0 +1,185 @@
+name: 🏗️ ONNX Runtime Binaries
+on:
+  workflow_dispatch:
+    inputs:
+      onnxruntime-tag:
+        type: string
+        description: "ONNX Runtime tag to build"
+        default: "v1.23.2"
+      apple-deploy-target:
+        type: string
+        description: "Minimum macOS version for Apple builds"
+        default: "12.0"
+permissions:
+  contents: read
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.ref }}'
+  cancel-in-progress: true
+env:
+  ORT_TAG: ${{ inputs.onnxruntime-tag || 'v1.23.2' }}
+  APPLE_DEPLOY_TARGET: ${{ inputs.apple-deploy-target || '12.0' }}
+  RUST_BACKTRACE: 1
+jobs:
+  build:
+    name: ${{ matrix.target.name }}
+    runs-on: ${{ matrix.target.os }}
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: macOS (arm64)
+            os: macos-15
+            triple: aarch64-apple-darwin
+            platform: MacOS
+            arch: arm64
+            ep-args: '--use_coreml'
+            features: 'std,ndarray,coreml'
+          - name: macOS (x64)
+            os: macos-15-intel
+            triple: x86_64-apple-darwin
+            platform: MacOS
+            arch: x86_64
+            ep-args: '--use_coreml'
+            features: 'std,ndarray,coreml'
+          - name: Windows (x64)
+            os: windows-latest
+            triple: x86_64-pc-windows-msvc
+            platform: Windows
+            ep-args: ''
+            features: 'std,ndarray'
+          - name: Linux (x64)
+            os: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+            platform: Linux
+            ep-args: ''
+            features: 'std,ndarray'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 22.04 ships cmake 3.22 and gcc 11; ONNX Runtime needs cmake >=3.28 and a solid C++20.
+      - name: Set up Linux toolchain
+        if: matrix.target.platform == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-12 g++-12
+          python -m pip install --upgrade 'cmake>=3.28'
+          echo "CC=gcc-12" >> "$GITHUB_ENV"
+          echo "CXX=g++-12" >> "$GITHUB_ENV"
+
+      # Applies to the ONNX Runtime build and to rustc, which must agree on the target.
+      - name: Set Apple deployment target
+        if: matrix.target.platform == 'MacOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=$APPLE_DEPLOY_TARGET" >> "$GITHUB_ENV"
+
+      - name: Clone ONNX Runtime
+        run: |
+          git clone https://github.com/microsoft/onnxruntime --recursive --single-branch --depth 1 --branch "$ORT_TAG"
+          cmake --version
+
+      - name: Build ONNX Runtime
+        working-directory: onnxruntime
+        run: |
+          args=(
+            --build_dir "build/${{ matrix.target.platform }}"
+            --config Release
+            --parallel
+            --update --build
+            --skip_tests
+            --skip_submodule_sync
+            --compile_no_warning_as_error
+          )
+          # --skip_tests only skips *running* them. The test targets still compile, and they pull in
+          # APIs unavailable below macOS 13.4, which is why upstream raised its own floor rather than
+          # fix the build (microsoft/onnxruntime#24277, #25616). Dropping them is what makes a 12.0
+          # build possible at all.
+          args+=( --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF )
+
+          if [[ "${{ matrix.target.platform }}" == "MacOS" ]]; then
+            # --apple_deploy_target is ignored unless --macos/--ios is also passed, and those force an
+            # Xcode-generator shared framework build. Set the CMake variable directly instead.
+            args+=( --cmake_extra_defines "CMAKE_OSX_DEPLOYMENT_TARGET=$APPLE_DEPLOY_TARGET" )
+            args+=( --cmake_extra_defines "CMAKE_OSX_ARCHITECTURES=${{ matrix.target.arch }}" )
+          fi
+
+          # Called directly rather than through build.sh/build.bat, which inject --use_telemetry.
+          python tools/ci_build/build.py "${args[@]}" ${{ matrix.target.ep-args }}
+
+      # A silently-ignored deployment target yields an artifact that looks fine and only fails on a
+      # real macOS 12 machine, so gate on it here.
+      - name: Verify deployment target
+        if: matrix.target.platform == 'MacOS'
+        working-directory: onnxruntime/build/MacOS/Release
+        run: |
+          # Anything at or below the target is fine; only a higher floor breaks macOS 12.
+          above() { [ "$(printf '%s\n%s\n' "$APPLE_DEPLOY_TARGET" "$1" | sort -V | tail -1)" != "$APPLE_DEPLOY_TARGET" ]; }
+
+          minos_of() { otool -l "$1" 2>/dev/null | awk '/^ *minos /{print $2}' | sort -V | tail -1 || true; }
+
+          highest=$(find . -name '*.a' -exec otool -l {} + 2>/dev/null | awk '/^ *minos /{print $2}' | sort -V | tail -1 || true)
+          echo "highest minos across all objects: ${highest:-<none>}"
+          if [ -z "$highest" ]; then
+            echo "::error::no LC_BUILD_VERSION load commands found - cannot verify deployment target"
+            exit 1
+          fi
+
+          fail=0
+          while IFS= read -r lib; do
+            m=$(minos_of "$lib")
+            [ -n "$m" ] || continue
+            if above "$m"; then
+              echo "::error::$lib requires macOS $m, above the requested $APPLE_DEPLOY_TARGET"
+              fail=1
+            fi
+          done < <(find . -name '*.a')
+          [ "$fail" -eq 0 ] || exit 1
+
+          probe=$(find . -name 'libonnxruntime_common.a' | head -1)
+          if [ -z "$probe" ]; then
+            echo "::error::libonnxruntime_common.a not found - build layout is not what packaging expects"
+            exit 1
+          fi
+          archs=$(lipo -archs "$probe" | tr ' ' '\n' | sort -u | paste -sd, -)
+          echo "archs: $archs"
+          [ "$archs" = "${{ matrix.target.arch }}" ] || { echo "::error::expected ${{ matrix.target.arch }}, got $archs"; exit 1; }
+
+      - name: Package
+        run: |
+          src="onnxruntime/build/${{ matrix.target.platform }}/Release"
+          # ort's static linking expects the archives exactly where the build tree leaves them
+          # (component libs at the root, vendored deps under _deps/), so preserve relative paths and
+          # ship nothing else. Consumers point ORT_LIB_LOCATION at the extracted directory.
+          ( cd "$src" && find . \( -name '*.a' -o -name '*.lib' \) -print > "$GITHUB_WORKSPACE/libs.txt" )
+          count=$(wc -l < libs.txt)
+          echo "packaging $count libraries"
+          # An empty archive still uploads cleanly, so fail loudly instead.
+          [ "$count" -gt 0 ] || { echo "::error::no libraries found under $src"; exit 1; }
+          tar -czf "onnxruntime-$ORT_TAG-${{ matrix.target.triple }}.tgz" -C "$src" -T libs.txt
+          ls -la onnxruntime-*.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: onnxruntime-${{ env.ORT_TAG }}-${{ matrix.target.triple }}
+          path: onnxruntime-${{ env.ORT_TAG }}-${{ matrix.target.triple }}.tgz
+          if-no-files-found: error
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2.7.8
+
+      - name: Smoke test
+        run: |
+          ORT_LIB_LOCATION="$PWD/onnxruntime/build/${{ matrix.target.platform }}/Release" \
+            cargo test -p ort --no-default-features --features ${{ matrix.target.features }} \
+            --test custom_build -- --nocapture --test-threads 1
+        env:
+          RUSTFLAGS: ${{ startsWith(matrix.target.os, 'macos') && '-Clink-arg=-fapple-link-rtlib' || '' }}
