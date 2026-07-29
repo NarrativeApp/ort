@@ -31,18 +31,17 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          - name: macOS (arm64)
+          # Built universal on arm64 rather than natively per-arch. The Intel runners are slow, and a
+          # pure x86_64 cross build leaves an x86_64-only protoc that the build then has to execute,
+          # which needs Rosetta - not in the runner image manifest, and something Apple is winding
+          # down. A universal protoc carries an arm64 slice and runs natively. The resulting fat
+          # archives link for both aarch64- and x86_64-apple-darwin, so one artifact serves both.
+          - name: macOS (universal2)
             os: macos-15
-            triple: aarch64-apple-darwin
+            triple: universal2-apple-darwin
             platform: MacOS
-            arch: arm64
-            ep-args: '--use_coreml'
-            features: 'std,ndarray,coreml'
-          - name: macOS (x64)
-            os: macos-15-intel
-            triple: x86_64-apple-darwin
-            platform: MacOS
-            arch: x86_64
+            arch: 'arm64;x86_64'
+            expect-archs: 'arm64,x86_64'
             ep-args: '--use_coreml'
             features: 'std,ndarray,coreml'
           - name: Windows (x64)
@@ -148,7 +147,8 @@ jobs:
           fi
           archs=$(lipo -archs "$probe" | tr ' ' '\n' | sort -u | paste -sd, -)
           echo "archs: $archs"
-          [ "$archs" = "${{ matrix.target.arch }}" ] || { echo "::error::expected ${{ matrix.target.arch }}, got $archs"; exit 1; }
+          expected='${{ matrix.target.expect-archs }}'
+          [ "$archs" = "$expected" ] || { echo "::error::expected $expected, got $archs"; exit 1; }
 
       - name: Package
         run: |
@@ -173,6 +173,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+          targets: ${{ matrix.target.platform == 'MacOS' && 'x86_64-apple-darwin' || '' }}
 
       - uses: Swatinem/rust-cache@v2.7.8
 
@@ -183,3 +184,15 @@ jobs:
             --test custom_build -- --nocapture --test-threads 1
         env:
           RUSTFLAGS: ${{ startsWith(matrix.target.os, 'macos') && '-Clink-arg=-fapple-link-rtlib' || '' }}
+
+      # The x86_64 slice can't be executed on an arm64 runner, so prove it at least links. Intel
+      # runtime validation has to happen on real macOS 12 hardware regardless - a 12.0 deployment
+      # target exercised on macOS 15 proves very little.
+      - name: Verify x86_64 slice links
+        if: matrix.target.platform == 'MacOS'
+        run: |
+          ORT_LIB_LOCATION="$PWD/onnxruntime/build/MacOS/Release" \
+            cargo test -p ort --no-default-features --features ${{ matrix.target.features }} \
+            --test custom_build --target x86_64-apple-darwin --no-run
+        env:
+          RUSTFLAGS: '-Clink-arg=-fapple-link-rtlib'
