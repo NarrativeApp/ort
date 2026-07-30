@@ -120,6 +120,30 @@ jobs:
           rm -rf onnxruntime
           git clone https://github.com/microsoft/onnxruntime --recursive --single-branch --depth 1 --branch "$ORT_TAG"
 
+      # ORT skips its install(EXPORT) block only for static+webgpu builds, but the same reasoning
+      # applies to any static build. coreml_proto is never added to an export set (true in every
+      # release through main), and universal2 additionally creates onnxruntime_mlas_arm64/_x86_64
+      # which aren't either, so generate fails before anything compiles:
+      #   install(EXPORT "onnxruntimeTargets" ...) includes target "onnxruntime_providers_coreml"
+      #   which requires target "coreml_proto" that is not in any export set
+      # Upstream only tests CoreML with --build_shared_lib, where the shared library absorbs those
+      # static deps, which is why this configuration is unguarded. We link archives straight out of
+      # the build tree and never consume ORT's CMake package, so widen the skip to all static builds.
+      # Applied everywhere: it's inert where the export set is already consistent.
+      - name: Skip ORT install(EXPORT) for static builds
+        run: |
+          python -c "
+          import pathlib, sys
+          p = pathlib.Path('onnxruntime/cmake/CMakeLists.txt')
+          s = p.read_text()
+          old = 'if(NOT onnxruntime_BUILD_SHARED_LIB AND onnxruntime_USE_WEBGPU)'
+          new = 'if(NOT onnxruntime_BUILD_SHARED_LIB)'
+          n = s.count(old)
+          if n != 1: sys.exit('expected exactly 1 install(EXPORT) guard, found %d - has ORT cmake changed?' % n)
+          p.write_text(s.replace(old, new, 1))
+          print('patched install(EXPORT) guard')
+          "
+
       - name: Build ONNX Runtime
         working-directory: onnxruntime
         run: |
