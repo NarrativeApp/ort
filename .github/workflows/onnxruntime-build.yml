@@ -133,6 +133,13 @@ jobs:
           python tools/ci_build/build.py "${args[@]}" \
             ${{ matrix.target.ep-args }} ${{ matrix.target.cache-args }}
 
+          # ORT declares re2 EXCLUDE_FROM_ALL. Static component libs don't link, so with unit tests
+          # off nothing in the graph ever links re2::re2 and libre2 is never produced - yet
+          # onnxruntime_providers and onnxruntime_session both reference re2::RE2 symbols, so the
+          # Rust link fails. Upstream's static-link CI only gets away with this because it builds
+          # the tests. We can't (that's what needs macOS 13.4), so build the target explicitly.
+          cmake --build "build/${{ matrix.target.platform }}/Release" --target re2 --config Release
+
       - name: ccache stats
         if: matrix.target.cache-args != ''
         run: |
