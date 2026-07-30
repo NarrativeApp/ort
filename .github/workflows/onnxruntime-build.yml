@@ -10,6 +10,12 @@ on:
         type: string
         description: "Minimum macOS version for Apple builds"
         default: "12.0"
+  # Narrow on purpose: this occupies a self-hosted Mac for ~30m. Also the only way to trigger a run
+  # while the workflow isn't on the default branch, since workflow_dispatch requires it to be there.
+  push:
+    paths:
+      - '.github/workflows/onnxruntime-build.yml'
+      - 'tests/custom_build.rs'
 permissions:
   contents: read
 concurrency:
