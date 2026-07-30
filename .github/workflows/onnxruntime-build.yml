@@ -49,9 +49,6 @@ jobs:
           # symbols undefined; plus a stream of ld arch-mismatch warnings. Single-arch produces one
           # libonnxruntime_mlas.a and does build cpuinfo, matching what upstream ORT and ort test.
           #
-          # x86_64 is deferred, not dropped - it needs a host-arch protoc, which upstream solves with
-          # --use_vcpkg. The Rosetta probe below gathers the data to decide how.
-          #
           # On Namespace rather than the self-hosted fleet: every org runner group is
           # allows_public_repositories=false, and this repo is a public fork whose visibility can't
           # be changed (fork visibility is tied to the upstream network). Move back to
@@ -66,6 +63,21 @@ jobs:
             ep-args: '--use_coreml'
             cache-args: ''
             unit-tests: 'OFF'
+            rust-target: ''
+            features: 'std,ndarray,coreml'
+          # Cross-compiled on the arm64 runner. This builds an x86_64-only protoc that the build then
+          # has to execute, which needs Rosetta - confirmed present on this image by the probe below,
+          # though it isn't in the image manifest, so the probe stays in as an early warning.
+          - name: macOS (x64)
+            runner: '[ "namespace-profile-macos-14" ]'
+            triple: x86_64-apple-darwin
+            platform: MacOS
+            arch: 'x86_64'
+            expect-archs: 'x86_64'
+            ep-args: '--use_coreml'
+            cache-args: ''
+            unit-tests: 'OFF'
+            rust-target: 'x86_64-apple-darwin'
             features: 'std,ndarray,coreml'
           # Unit tests stay ON here purely to get re2 built. The VS generator maps
           # `cmake --build --target re2` to a bare re2.vcxproj in the build root, but the project
@@ -79,6 +91,7 @@ jobs:
             ep-args: ''
             cache-args: ''
             unit-tests: 'ON'
+            rust-target: ''
             features: 'std,ndarray'
           - name: Linux (x64)
             runner: '[ "namespace-profile-ubuntu-8-core" ]'
@@ -87,6 +100,7 @@ jobs:
             ep-args: ''
             cache-args: ''
             unit-tests: 'OFF'
+            rust-target: ''
             features: 'std,ndarray'
     steps:
       # Default clean:true matters on the self-hosted runner - it clears the previous run's
@@ -280,14 +294,40 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+          targets: ${{ matrix.target.rust-target }}
 
       - uses: Swatinem/rust-cache@v2.7.8
 
       - name: Smoke test
+        if: matrix.target.rust-target == ''
         run: |
           ORT_LIB_LOCATION="$PWD/onnxruntime/build/${{ matrix.target.platform }}/Release" \
             cargo test -p ort --no-default-features --features ${{ matrix.target.features }} \
             --test custom_build -- --nocapture --test-threads 1
+        env:
+          RUSTFLAGS: ${{ matrix.target.platform == 'MacOS' && '-Clink-arg=-fapple-link-rtlib' || '' }}
+
+      # Cross-targeted: linking is the gate, since it's what proves the archives are complete and
+      # the right arch. Executing the harness is attempted separately below.
+      - name: Smoke test (link)
+        if: matrix.target.rust-target != ''
+        run: |
+          ORT_LIB_LOCATION="$PWD/onnxruntime/build/${{ matrix.target.platform }}/Release" \
+            cargo test -p ort --no-default-features --features ${{ matrix.target.features }} \
+            --test custom_build --target ${{ matrix.target.rust-target }} --no-run
+        env:
+          RUSTFLAGS: ${{ matrix.target.platform == 'MacOS' && '-Clink-arg=-fapple-link-rtlib' || '' }}
+
+      # An x86_64 harness on an arm64 runner only runs under Rosetta, and CoreML under translation is
+      # its own question, so this reports without gating. Real Intel validation needs macOS 12
+      # hardware regardless - a 12.0 deployment target exercised on macOS 14 proves little.
+      - name: Smoke test (execute, informational)
+        if: matrix.target.rust-target != ''
+        continue-on-error: true
+        run: |
+          ORT_LIB_LOCATION="$PWD/onnxruntime/build/${{ matrix.target.platform }}/Release" \
+            cargo test -p ort --no-default-features --features ${{ matrix.target.features }} \
+            --test custom_build --target ${{ matrix.target.rust-target }} -- --nocapture --test-threads 1
         env:
           RUSTFLAGS: ${{ matrix.target.platform == 'MacOS' && '-Clink-arg=-fapple-link-rtlib' || '' }}
 
