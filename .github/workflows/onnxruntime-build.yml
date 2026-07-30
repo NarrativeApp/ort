@@ -192,6 +192,17 @@ jobs:
           # build possible at all, and it takes a large chunk off the build time.
           args+=( --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=${{ matrix.target.unit-tests }} )
 
+          if [[ "${{ matrix.target.platform }}" == "Windows" ]]; then
+            # ORT force-enables debug info for Release on Windows (add_default_definition ->
+            # ProgramDatabase). Under /Zi the object files still carry CodeView .debug$S/.debug$T
+            # records for the linker to merge, and for template-heavy C++ those dominate archive size
+            # - the Windows artifact is ~7x Linux for the same code, and Linux Release passes no -g at
+            # all. We ship only .lib files and never the PDBs, so it's dead weight. Empty means "add
+            # no debug information format flag"; needs CMake >=3.25 with CMP0141 NEW, both already in
+            # play since ORT sets this variable itself.
+            args+=( --cmake_extra_defines "CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=" )
+          fi
+
           if [[ "${{ matrix.target.platform }}" == "MacOS" ]]; then
             # --apple_deploy_target is ignored unless --macos/--ios is also passed, and those force an
             # Xcode-generator shared framework build. Set the CMake variable directly instead.
@@ -277,11 +288,23 @@ jobs:
           # ort's static linking expects the archives exactly where the build tree leaves them
           # (component libs at the root, vendored deps under _deps/), so preserve relative paths and
           # ship nothing else. Consumers point ORT_LIB_LOCATION at the extracted directory.
-          ( cd "$src" && find . \( -name '*.a' -o -name '*.lib' \) -print > "$GITHUB_WORKSPACE/libs.txt" )
+          # Deliberately a denylist, not an allowlist: the repeated failure mode here has been a
+          # *missing* archive (re2, cpuinfo, per-arch mlas, absl), so default to shipping everything
+          # and only drop what provably can't be linked. libprotoc is the protobuf compiler, not the
+          # runtime, and gtest/gmock only exist because Windows builds unit tests to get re2. On
+          # Windows those are ~56MB of a 958MB tree.
+          ( cd "$src" && find . \( -name '*.a' -o -name '*.lib' \) \
+              ! -iname '*libprotoc*' ! -iname '*gtest*' ! -iname '*gmock*' ! -iname '*benchmark*' \
+              -print > "$GITHUB_WORKSPACE/libs.txt" )
           count=$(wc -l < libs.txt)
           echo "packaging $count libraries"
           # An empty archive still uploads cleanly, so fail loudly instead.
           [ "$count" -gt 0 ] || { echo "::error::no libraries found under $src"; exit 1; }
+          # Instrumentation: makes it obvious which archives dominate, so size regressions are
+          # diagnosable from the log instead of needing the artifact pulled down.
+          echo "largest archives:"
+          ( cd "$src" && tr '\n' '\0' < "$GITHUB_WORKSPACE/libs.txt" | xargs -0 du -k 2>/dev/null \
+            | sort -rn | head -10 | awk '{printf "  %8.1f MB  %s\n", $1/1024, $2}' ) || true
           tar -czf "onnxruntime-$ORT_TAG-${{ matrix.target.triple }}.tgz" -C "$src" -T libs.txt
           ls -la onnxruntime-*.tgz
 
