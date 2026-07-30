@@ -16,6 +16,8 @@ on:
     paths:
       - '.github/workflows/onnxruntime-build.yml'
       - 'tests/custom_build.rs'
+      # Link logic - a change here can break the smoke test without touching anything else.
+      - 'ort-sys/build/**'
 permissions:
   contents: read
 concurrency:
