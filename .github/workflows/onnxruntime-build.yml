@@ -95,6 +95,7 @@ jobs:
           # Pinned rather than taken from the image so the cmake >=3.28 floor is explicit; 24.04
           # ships 3.28.3, which only just clears it.
           python -m pip install --upgrade 'cmake>=3.28'
+          echo "CMAKE=$(command -v cmake)" >> "$GITHUB_ENV"
           cmake --version
           cc --version | head -1
           # Informational: this is the glibc floor of the resulting artifact.
@@ -103,8 +104,11 @@ jobs:
       - name: Set up macOS toolchain
         if: matrix.target.platform == 'MacOS'
         run: |
-          # Test for the binary, not the brew formula - the runner image ships cmake outside brew.
-          command -v cmake >/dev/null || brew install cmake
+          # The runner image ships cmake 4.x, which has removed compatibility with
+          # cmake_minimum_required < 3.5 - and psimd, pulled in on ARM, still declares that. ORT
+          # 1.23.2 predates CMake 4, so pin below it rather than chase policy flags one at a time.
+          python -m pip install --upgrade 'cmake<4'
+          echo "CMAKE=$(command -v cmake)" >> "$GITHUB_ENV"
           cmake --version
           xcodebuild -version | head -1
           # Applies to the ONNX Runtime build and to rustc, which must agree on the target.
@@ -141,8 +145,13 @@ jobs:
             args+=( --cmake_extra_defines "CMAKE_OSX_ARCHITECTURES=${{ matrix.target.arch }}" )
           fi
 
+          # $CMAKE is set by the toolchain steps where a specific cmake is required; passed
+          # explicitly so PATH ordering against the image's own cmake can't decide it.
+          cmake_bin="${CMAKE:-cmake}"
+          "$cmake_bin" --version
+
           # Called directly rather than through build.sh/build.bat, which inject --use_telemetry.
-          python tools/ci_build/build.py "${args[@]}" \
+          python tools/ci_build/build.py "${args[@]}" --cmake_path "$cmake_bin" \
             ${{ matrix.target.ep-args }} ${{ matrix.target.cache-args }}
 
           # ORT declares re2 EXCLUDE_FROM_ALL. Static component libs don't link, so with unit tests
@@ -152,7 +161,7 @@ jobs:
           # tests; where we can't (macOS, and Linux for speed), build the target explicitly.
           bdir="build/${{ matrix.target.platform }}/Release"
           if [[ "${{ matrix.target.unit-tests }}" == "OFF" ]]; then
-            cmake --build "$bdir" --target re2 --config Release
+            "$cmake_bin" --build "$bdir" --target re2 --config Release
           fi
 
           # Assert it landed either way, so this can never silently reach the smoke test again.
