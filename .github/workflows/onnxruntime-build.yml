@@ -39,22 +39,28 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          # Built universal on arm64 rather than natively per-arch. Intel runners are slow, and a
-          # pure x86_64 cross build leaves an x86_64-only protoc that the build then has to execute,
-          # which needs Rosetta - not in any runner image manifest, and something Apple is winding
-          # down. A universal protoc carries an arm64 slice and runs natively. The resulting fat
-          # archives link for both aarch64- and x86_64-apple-darwin, so one artifact serves both.
+          # Single-arch, not universal2. universal2 avoided needing Rosetta for protoc, but it is a
+          # configuration nobody upstream builds and it broke in four separate ways: per-arch mlas
+          # targets missing from ORT's export set; cpuinfo silently not built because
+          # onnxruntime_target_platform stops matching a single arch; the per-arch mlas kernel
+          # archives (libonnxruntime_mlas_arm64/_x86_64) not being linked by ort-sys, leaving NEON
+          # symbols undefined; plus a stream of ld arch-mismatch warnings. Single-arch produces one
+          # libonnxruntime_mlas.a and does build cpuinfo, matching what upstream ORT and ort test.
+          #
+          # x86_64 is deferred, not dropped - it needs a host-arch protoc, which upstream solves with
+          # --use_vcpkg. The Rosetta probe below gathers the data to decide how.
+          #
           # On Namespace rather than the self-hosted fleet: every org runner group is
           # allows_public_repositories=false, and this repo is a public fork whose visibility can't
           # be changed (fork visibility is tied to the upstream network). Move back to
           # [self-hosted, macOS, ARM64, ane] if that policy is ever relaxed - the disk persists
           # there, so --use_cache becomes worth adding back.
-          - name: macOS (universal2)
+          - name: macOS (arm64)
             runner: '[ "namespace-profile-macos-14" ]'
-            triple: universal2-apple-darwin
+            triple: aarch64-apple-darwin
             platform: MacOS
-            arch: 'arm64;x86_64'
-            expect-archs: 'arm64,x86_64'
+            arch: 'arm64'
+            expect-archs: 'arm64'
             ep-args: '--use_coreml'
             cache-args: ''
             unit-tests: 'OFF'
@@ -111,6 +117,14 @@ jobs:
           echo "CMAKE=$(command -v cmake)" >> "$GITHUB_ENV"
           cmake --version
           xcodebuild -version | head -1
+          # Informational, for the deferred x86_64 job: a plain x86_64 cross build produces an
+          # x86_64-only protoc that the build then has to execute. If Rosetta is present that works
+          # with no extra flags; if not, x86_64 needs --use_vcpkg or an explicit host protoc.
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "rosetta: available (plain x86_64 cross build should work)"
+          else
+            echo "rosetta: NOT available (x86_64 will need --use_vcpkg or --path_to_protoc_exe)"
+          fi
           # Applies to the ONNX Runtime build and to rustc, which must agree on the target.
           echo "MACOSX_DEPLOYMENT_TARGET=$APPLE_DEPLOY_TARGET" >> "$GITHUB_ENV"
 
@@ -264,7 +278,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          targets: ${{ matrix.target.platform == 'MacOS' && 'x86_64-apple-darwin' || '' }}
 
       - uses: Swatinem/rust-cache@v2.7.8
 
@@ -275,18 +288,6 @@ jobs:
             --test custom_build -- --nocapture --test-threads 1
         env:
           RUSTFLAGS: ${{ matrix.target.platform == 'MacOS' && '-Clink-arg=-fapple-link-rtlib' || '' }}
-
-      # The x86_64 slice can't be executed on an arm64 runner, so prove it at least links. Intel
-      # runtime validation has to happen on real macOS 12 hardware regardless - a 12.0 deployment
-      # target exercised on macOS 15 proves very little.
-      - name: Verify x86_64 slice links
-        if: matrix.target.platform == 'MacOS'
-        run: |
-          ORT_LIB_LOCATION="$PWD/onnxruntime/build/MacOS/Release" \
-            cargo test -p ort --no-default-features --features ${{ matrix.target.features }} \
-            --test custom_build --target x86_64-apple-darwin --no-run
-        env:
-          RUSTFLAGS: '-Clink-arg=-fapple-link-rtlib'
 
       # Reclaims several GB on the self-hosted runner. Left in place on failure so the tree can be
       # inspected; the next run's checkout clean will remove it.

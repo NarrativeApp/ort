@@ -200,7 +200,8 @@ pub fn static_link(base_lib_dir: &Path) -> bool {
 				optional_link_lib(vcpkg_lib_dir.as_ref().unwrap(), "nsync_cpp");
 			}
 
-			add_search_dir(transform_dep(external_lib_dir.join("pytorch_cpuinfo-build"), &profile));
+			let cpuinfo_dir = transform_dep(external_lib_dir.join("pytorch_cpuinfo-build"), &profile);
+			add_search_dir(&cpuinfo_dir);
 			if !has_vcpkg_link {
 				// clog isn't built when not building unit tests, or when compiling for android
 				for potential_clog_path in [
@@ -214,7 +215,14 @@ pub fn static_link(base_lib_dir: &Path) -> bool {
 			} else {
 				optional_link_lib(vcpkg_lib_dir.as_ref().unwrap(), "clog");
 			}
-			println!("cargo:rustc-link-lib=static=cpuinfo");
+			// ORT sets CPUINFO_SUPPORTED=FALSE whenever `onnxruntime_target_platform` isn't a single
+			// recognised arch - universal2 Apple builds among them - and then compiles without cpuinfo
+			// entirely, referencing none of its symbols. So its absence is valid, not an error.
+			if !optional_link_lib(&cpuinfo_dir, "cpuinfo")
+				&& !vcpkg_lib_dir.as_ref().is_some_and(|dir| optional_link_lib(dir.as_path(), "cpuinfo"))
+			{
+				log::debug!("cpuinfo not found; assuming ORT was built with CPUINFO_SUPPORTED=FALSE");
+			}
 
 			if !has_vcpkg_link {
 				add_search_dir(transform_dep(external_lib_dir.join("re2-build"), &profile));
@@ -274,6 +282,7 @@ pub fn static_link(base_lib_dir: &Path) -> bool {
 				println!("cargo:rustc-link-lib=static=absl_log_internal_proto");
 				println!("cargo:rustc-link-lib=static=absl_log_internal_globals");
 				optional_link_lib(&abseil_lib_log_dir, "absl_log_internal_check_op");
+				optional_link_lib(&abseil_lib_log_dir, "absl_log_internal_structured_proto");
 				println!("cargo:rustc-link-lib=static=absl_log_internal_log_sink_set");
 				println!("cargo:rustc-link-lib=static=absl_log_sink");
 				println!("cargo:rustc-link-lib=static=absl_log_internal_message");
