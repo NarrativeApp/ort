@@ -44,22 +44,33 @@ jobs:
           # which needs Rosetta - not in any runner image manifest, and something Apple is winding
           # down. A universal protoc carries an arm64 slice and runs natively. The resulting fat
           # archives link for both aarch64- and x86_64-apple-darwin, so one artifact serves both.
+          # On Namespace rather than the self-hosted fleet: every org runner group is
+          # allows_public_repositories=false, and this repo is a public fork whose visibility can't
+          # be changed (fork visibility is tied to the upstream network). Move back to
+          # [self-hosted, macOS, ARM64, ane] if that policy is ever relaxed - the disk persists
+          # there, so --use_cache becomes worth adding back.
           - name: macOS (universal2)
-            runner: '[ "self-hosted", "macOS", "ARM64", "ane" ]'
+            runner: '[ "namespace-profile-macos-14" ]'
             triple: universal2-apple-darwin
             platform: MacOS
             arch: 'arm64;x86_64'
             expect-archs: 'arm64,x86_64'
             ep-args: '--use_coreml'
-            # ccache only pays off where the disk persists between runs, i.e. self-hosted.
-            cache-args: '--use_cache'
+            cache-args: ''
+            unit-tests: 'OFF'
             features: 'std,ndarray,coreml'
+          # Unit tests stay ON here purely to get re2 built. The VS generator maps
+          # `cmake --build --target re2` to a bare re2.vcxproj in the build root, but the project
+          # lives under _deps/, so it fails with MSB1009. Building the tests links re2::re2 and
+          # produces it as a side effect - that's upstream's own configuration, at the cost of a
+          # slower build. Windows has no macOS-style availability problem, so nothing else objects.
           - name: Windows (x64)
             runner: '[ "namespace-profile-windows-16-core" ]'
             triple: x86_64-pc-windows-msvc
             platform: Windows
             ep-args: ''
             cache-args: ''
+            unit-tests: 'ON'
             features: 'std,ndarray'
           - name: Linux (x64)
             runner: '[ "namespace-profile-ubuntu-8-core" ]'
@@ -67,6 +78,7 @@ jobs:
             platform: Linux
             ep-args: ''
             cache-args: ''
+            unit-tests: 'OFF'
             features: 'std,ndarray'
     steps:
       # Default clean:true matters on the self-hosted runner - it clears the previous run's
@@ -91,10 +103,10 @@ jobs:
       - name: Set up macOS toolchain
         if: matrix.target.platform == 'MacOS'
         run: |
-          brew list cmake >/dev/null 2>&1 || brew install cmake
-          brew list ccache >/dev/null 2>&1 || brew install ccache
-          ccache --max-size=20G
+          # Test for the binary, not the brew formula - the runner image ships cmake outside brew.
+          command -v cmake >/dev/null || brew install cmake
           cmake --version
+          xcodebuild -version | head -1
           # Applies to the ONNX Runtime build and to rustc, which must agree on the target.
           echo "MACOSX_DEPLOYMENT_TARGET=$APPLE_DEPLOY_TARGET" >> "$GITHUB_ENV"
 
@@ -119,8 +131,8 @@ jobs:
           # --skip_tests only skips *running* them. The test targets still compile, and they pull in
           # APIs unavailable below macOS 13.4, which is why upstream raised its own floor rather than
           # fix the build (microsoft/onnxruntime#24277, #25616). Dropping them is what makes a 12.0
-          # build possible at all, and it takes a large chunk off every platform's build time.
-          args+=( --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF )
+          # build possible at all, and it takes a large chunk off the build time.
+          args+=( --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=${{ matrix.target.unit-tests }} )
 
           if [[ "${{ matrix.target.platform }}" == "MacOS" ]]; then
             # --apple_deploy_target is ignored unless --macos/--ios is also passed, and those force an
@@ -136,9 +148,18 @@ jobs:
           # ORT declares re2 EXCLUDE_FROM_ALL. Static component libs don't link, so with unit tests
           # off nothing in the graph ever links re2::re2 and libre2 is never produced - yet
           # onnxruntime_providers and onnxruntime_session both reference re2::RE2 symbols, so the
-          # Rust link fails. Upstream's static-link CI only gets away with this because it builds
-          # the tests. We can't (that's what needs macOS 13.4), so build the target explicitly.
-          cmake --build "build/${{ matrix.target.platform }}/Release" --target re2 --config Release
+          # Rust link fails. Upstream's static-link CI only gets away with this because it builds the
+          # tests; where we can't (macOS, and Linux for speed), build the target explicitly.
+          bdir="build/${{ matrix.target.platform }}/Release"
+          if [[ "${{ matrix.target.unit-tests }}" == "OFF" ]]; then
+            cmake --build "$bdir" --target re2 --config Release
+          fi
+
+          # Assert it landed either way, so this can never silently reach the smoke test again.
+          if ! find "$bdir/_deps/re2-build" \( -name 'libre2.a' -o -name 're2.lib' \) 2>/dev/null | grep -q .; then
+            echo "::error::re2 was not built - onnxruntime_providers/session reference re2::RE2 and the Rust link will fail"
+            exit 1
+          fi
 
       - name: ccache stats
         if: matrix.target.cache-args != ''
