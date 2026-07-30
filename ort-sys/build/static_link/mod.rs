@@ -283,6 +283,7 @@ pub fn static_link(base_lib_dir: &Path) -> bool {
 				println!("cargo:rustc-link-lib=static=absl_log_internal_globals");
 				optional_link_lib(&abseil_lib_log_dir, "absl_log_internal_check_op");
 				optional_link_lib(&abseil_lib_log_dir, "absl_log_internal_structured_proto");
+				optional_link_lib(&abseil_lib_log_dir, "absl_log_internal_nullguard");
 				println!("cargo:rustc-link-lib=static=absl_log_internal_log_sink_set");
 				println!("cargo:rustc-link-lib=static=absl_log_sink");
 				println!("cargo:rustc-link-lib=static=absl_log_internal_message");
